@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS generation_requests (
   error_message TEXT NULL,
   first_generation_id VARCHAR(32) NULL,
   generation_ids TEXT NULL,
+  refs LONGTEXT NULL,
   created_at DATETIME(3) NOT NULL,
   updated_at DATETIME(3) NOT NULL,
   INDEX idx_generation_requests_created (created_at),

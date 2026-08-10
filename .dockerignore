@@ -1,0 +1,10 @@
+.git
+node_modules
+mysql
+data
+log
+screenshot
+*.before-*
+server.js.before-*
+public/*.before-*
+npm-debug.log

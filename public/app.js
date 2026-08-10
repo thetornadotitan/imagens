@@ -125,6 +125,7 @@ const i18n = {
     received: "Получено",
     receivedDesc: "Администратор свяжется с вами в ближайшее время",
     close: "Закрыть",
+    delete: "Удалить",
     adminTitle: "Панель управления",
     settings: "Настройки API",
     users: "Пользователи",
@@ -224,7 +225,7 @@ const i18n = {
     registerTitle: "Create account",
     authGift: "Sign in to continue creating",
     authContinue: "Sign in to continue creating",
-    authBonus: "10 bonus credits on signup + 1 daily check-in credit",
+    authBonus: "Unlimited local image generation",
     email: "Email",
     password: "Password",
     name: "Name",
@@ -244,6 +245,7 @@ const i18n = {
     received: "Received",
     receivedDesc: "Admin will contact you soon",
     close: "Close",
+    delete: "Delete",
     adminTitle: "Admin",
     settings: "Settings",
     users: "Users",
@@ -266,10 +268,10 @@ const i18n = {
     checkinToday: "Check in",
     checkedIn: "Checked in today",
     checkinReward: "Daily check-in gives 1 credit",
-    noticeTitle: "Content Safety Notice",
+    noticeTitle: "Local AI Service",
     noticeSubtitle: "To keep this platform healthy and safe, content review has been upgraded.",
     noticeCore: "Core Rules",
-    noticePrivacy: "Privacy Promise",
+    noticePrivacy: "Local data handling",
     noticeTogether: "Together: Thank you for your understanding.",
     noticeAck: "I understand",
     active: "Active",
@@ -484,7 +486,7 @@ function updateNav() {
   const loggedIn = Boolean(state.user);
   elements.loginBtn.classList.toggle("hidden", loggedIn);
   elements.logoutBtn.classList.toggle("hidden", !loggedIn);
-  elements.creditsBtn.classList.toggle("hidden", !loggedIn);
+  elements.creditsBtn?.classList.add("hidden");
   elements.myWorksBtn.classList.toggle("hidden", !loggedIn);
   elements.imageEditorBtn.classList.toggle("hidden", !loggedIn);
   elements.adminBtn.classList.toggle("hidden", state.user?.role !== "admin");
@@ -690,6 +692,111 @@ function renderComposers() {
   syncComposers();
 }
 
+
+function closeComposerDropups(except = null) {
+  $$(".composer-dropup.open").forEach((dropup) => {
+    if (dropup === except) return;
+    dropup.classList.remove("open");
+    $(".composer-dropup-trigger", dropup)
+      ?.setAttribute("aria-expanded", "false");
+  });
+}
+
+function enhanceComposerDropups(form) {
+  $$(".advanced-options select", form).forEach((select) => {
+    if (select.dataset.dropupEnhanced === "1") return;
+    select.dataset.dropupEnhanced = "1";
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "composer-dropup";
+
+    const fieldClass = [...select.classList]
+      .find((name) => name.endsWith("-input"));
+    if (fieldClass) {
+      wrapper.classList.add(
+        `composer-dropup-${fieldClass.replace("-input", "")}`
+      );
+    }
+
+    select.parentNode.insertBefore(wrapper, select);
+    wrapper.appendChild(select);
+    select.classList.add("composer-dropup-native");
+
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "composer-dropup-trigger";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.innerHTML =
+      '<span class="composer-dropup-value"></span>' +
+      '<i class="ri-arrow-up-s-line"></i>';
+
+    const menu = document.createElement("div");
+    menu.className = "composer-dropup-menu";
+    menu.setAttribute("role", "listbox");
+
+    [...select.options].forEach((option) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "composer-dropup-option";
+      item.dataset.value = option.value;
+      item.textContent = option.textContent;
+
+      item.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        select._dropupRefresh?.();
+        closeComposerDropups();
+      });
+
+      menu.appendChild(item);
+    });
+
+    wrapper.append(trigger, menu);
+
+    const refresh = () => {
+      const selected = select.options[select.selectedIndex];
+      $(".composer-dropup-value", trigger).textContent =
+        selected?.textContent || "";
+
+      $$(".composer-dropup-option", menu).forEach((item) => {
+        const active = item.dataset.value === select.value;
+        item.classList.toggle("selected", active);
+        item.setAttribute("aria-selected", String(active));
+      });
+    };
+
+    select._dropupRefresh = refresh;
+
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const opening = !wrapper.classList.contains("open");
+      closeComposerDropups(wrapper);
+      wrapper.classList.toggle("open", opening);
+      trigger.setAttribute("aria-expanded", String(opening));
+
+      if (opening) {
+        menu.querySelector(".selected")
+          ?.scrollIntoView({ block: "nearest" });
+      }
+    });
+
+    refresh();
+  });
+
+  if (!document.body.dataset.composerDropupsBound) {
+    document.body.dataset.composerDropupsBound = "1";
+    document.addEventListener("click", () => closeComposerDropups());
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeComposerDropups();
+    });
+  }
+}
+
 function createComposer(sticky) {
   const fragment = elements.composerTemplate.content.cloneNode(true);
   const form = $(".composer", fragment);
@@ -749,6 +856,7 @@ function createComposer(sticky) {
     event.preventDefault();
     submitGeneration(form);
   });
+  enhanceComposerDropups(form);
   applyI18n(form);
   return fragment;
 }
@@ -789,6 +897,9 @@ function syncComposers(sourceForm) {
       $(".format-input", form).value = state.generationOptions.outputFormat;
       $(".public-input", form).checked = state.publishToSquare;
     }
+    $$(".advanced-options select", form).forEach((select) => {
+      select._dropupRefresh?.();
+    });
     updateCustomSizeVisibility(form);
     $(".model-label", form).textContent = "Imagens";
     $(".send-button", form).disabled = state.generating || !state.settings?.hasApiKey;
@@ -871,6 +982,7 @@ async function submitGeneration(form) {
     state.history = data.generations.map((generation) => {
             var newItem = {
               id: generation.id,
+              userId: generation.userId,
               prompt: prompt,
               images: [generation.imageUrl],
               status: "done",
@@ -946,6 +1058,7 @@ async function loadHistory(before) {
         if (existingIds.has(generation.id)) return;
         state.history.push({
           id: generation.id,
+          userId: generation.userId,
           prompt: generation.prompt,
           images: [generation.imageUrl],
           status: "done",
@@ -1020,6 +1133,8 @@ function renderHistory() {
     <div class="image-grid">
       ${state.history.map((item) => {
         if (item.status === "done") {
+          const canDelete = !isAdmin || item.userId === state.user.id;
+          const deleteBtn = canDelete ? `<button type="button" data-delete-id="${escapeHtml(item.id)}" title="${escapeHtml(text("delete"))}" aria-label="${escapeHtml(text("delete"))}"><i class="ri-delete-bin-line"></i></button>` : "";
           return `
             <div class="image-cell" data-cell-id="${escapeHtml(item.id)}">
               <img src="${item.images[0]}" alt="${escapeHtml(truncate(item.prompt, 80))}">
@@ -1028,6 +1143,7 @@ function renderHistory() {
                 <button type="button" data-retry-id="${escapeHtml(item.id)}" title="${escapeHtml(text("retry"))}" aria-label="${escapeHtml(text("retry"))}"><i class="ri-refresh-line"></i></button>
                 <button type="button" data-edit="${escapeHtml(item.prompt)}" title="${escapeHtml(text("edit"))}" aria-label="${escapeHtml(text("edit"))}"><i class="ri-edit-line"></i></button>
                 <button type="button" data-edit-image="${escapeHtml(item.id)}" title="${escapeHtml(text("openEditor"))}" aria-label="${escapeHtml(text("openEditor"))}"><i class="ri-magic-line"></i></button>
+                ${deleteBtn}
               </div>
             </div>`;
         }
@@ -1072,6 +1188,20 @@ function renderHistory() {
       e.stopPropagation();
       const item = state.history.find((entry) => String(entry.id) === button.dataset.editImage);
       if (item?.images?.[0]) openImageEditor(item.images[0], item.prompt);
+    });
+  });
+  $$("[data-delete-id]", elements.historyList).forEach((button) => {
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = button.dataset.deleteId;
+      if (!confirm(text("delete"))) return;
+      api("/api/images/" + id + "/file", { method: "DELETE" }).then(function() {
+        state.history = state.history.filter(function(h) { return h.id !== id; });
+        renderAll();
+        showToast(text("delete"), "ri-delete-bin-line");
+      }).catch(function(err) {
+        showToast(err.message, "ri-error-warning-line");
+      });
     });
   });
   $$("[data-edit]", elements.historyList).forEach((button) => {
@@ -1237,7 +1367,7 @@ function promptCardHtml(prompt) {
   const primaryTag = (prompt.tags && prompt.tags[0]) || prompt.tag || "other";
   const artBg = prompt.colors || tagColor(primaryTag) || "linear-gradient(135deg,#64748b,#cbd5e1)";
   const iconClass = prompt.icon || tagIcon(primaryTag) || "ri-image-line";
-  var imgSrc = prompt.image || "https://picsum.photos/seed/" + prompt.id + "/400/400";
+  var imgSrc = prompt.image || "/logo.png";
   var art = '<img src="' + escapeHtml(imgSrc) + '" loading="lazy" decoding="async" fetchpriority="low" alt="' + escapeHtml(title) + '" crossorigin="anonymous" onerror="this.onerror=null;this.parentElement.classList.add(\'image-error\',\'image-fallback\');this.parentElement.querySelector(\'.card-fallback-icon\').style.display=\'flex\';">';
   return `
     <article class="prompt-card" style="--art-bg:${artBg}">
@@ -1900,33 +2030,33 @@ async function loadMyWorks(forceReload = false) {
 }
 
 function openComplianceNotice() {
-  const storageKey = "imageStudioComplianceNoticeV1";
+  const storageKey = "hiseyLocalServiceNoticeV1";
   if (localStorage.getItem(storageKey) === "seen") return;
   openModal(`
     <section class="modal compliance-modal" role="dialog" aria-modal="true" aria-labelledby="complianceTitle">
       <button class="close-modal compliance-close" type="button" aria-label="${text("close")}"><i class="ri-close-line"></i></button>
       <div class="compliance-icon"><i class="ri-shield-check-line"></i></div>
       <div class="compliance-title">
-        <h2 id="complianceTitle"><i class="ri-megaphone-fill"></i>${text("noticeTitle")}</h2>
-        <p>${text("noticeSubtitle")}</p>
+        <h2 id="complianceTitle"><i class="ri-home-heart-line"></i>Local AI Service</h2>
+        <p>Private, self-hosted image generation and editing on this server.</p>
       </div>
       <div class="notice-card danger">
-        <h3><span></span>${text("noticeCore")}</h3>
+        <h3><span></span>Usage boundaries</h3>
         <ul>
-          <li><strong>Prohibited content is strictly forbidden：</strong>Platform（including“Tavern”and other interactive tools）strictly prohibits vulgar or pornographic content、violence, gore、online scams、politically sensitive topics, and other illegal dialogue。</li>
-          <li><strong>Sensitive word filtering：</strong>System content safety audit is enabled，Automatically block inappropriate speech and harmful info。</li>
-          <li><strong>Strict action on violations：</strong>For violating accounts，We will take actions depending on severity：<em>Warning → Restrict features → Temporary ban → Permanent account deletion → Reporting to authorities。</em></li>
+          <li><strong>Broad model capabilities:</strong> This locally hosted service supports lawful SFW and adult content. It does not apply a general-purpose third-party moderation service.</li>
+          <li><strong>Strictly prohibited:</strong> Sexual content involving minors or ambiguous ages, non-consensual sexual content, sexual depictions of real identifiable people without consent, and other illegal content.</li>
+          <li><strong>User responsibility:</strong> Users are responsible for their prompts, uploads, generated images, consent, privacy, and compliance with applicable law.</li>
         </ul>
       </div>
       <div class="notice-card privacy">
-        <h3><i class="ri-shield-user-line"></i>${text("noticePrivacy")}</h3>
-        <p><strong>Information Security：</strong>We promise！Your information is stored encrypted internally，and is strictly used for system operation, compliance, and security purposes。We will not sell to any individual or third party、provide or disclose your data。</p>
+        <h3><i class="ri-shield-user-line"></i>Local data handling</h3>
+        <p>Account information, prompts, uploaded reference images, and generated images are stored on this server and separated by user account. Server administrators can access operational and generation records. This installation is restricted to local AI services. Public outbound access is blocked at both the application and Docker network layers, so this service cannot send content to third-party AI providers under its current security configuration. Changing these protections requires a server administrator to deliberately modify and redeploy the network controls.</p>
       </div>
       <div class="notice-card together">
-        <p><strong>${text("noticeTogether").split("：")[0]}：</strong>${text("noticeTogether").split("：").slice(1).join("：") || text("noticeTogether")}</p>
+        <p><strong>Use responsibly:</strong> Respect consent, privacy, intellectual property, and applicable law.</p>
       </div>
       <div class="compliance-actions">
-        <button class="modal-primary" type="button" data-compliance-ack>${text("noticeAck")}</button>
+        <button class="modal-primary" type="button" data-compliance-ack>Continue</button>
       </div>
     </section>
   `);
@@ -1942,25 +2072,30 @@ function openComplianceNotice() {
 }
 
 function openAuthModal(mode = state.authMode) {
-  // Registration is disabled — always show login
-  const safeMode = "login";
+  const registrationOpen = Boolean(state.settings?.allowRegistration);
+  const safeMode = mode === "register" && registrationOpen ? "register" : "login";
+  const registering = safeMode === "register";
   state.authMode = safeMode;
+
   openModal(`
     <section class="modal">
       <button class="close-modal" type="button"><i class="ri-close-line"></i></button>
       <div class="modal-title">
         <i class="ri-sparkling-2-fill"></i>
-        <h2>${text("loginTitle")}</h2>
-        <p><i class="ri-gift-line"></i> ${text("authContinue")}</p>
+        <h2>${text(registering ? "registerTitle" : "loginTitle")}</h2>
+        <p><i class="ri-gift-line"></i> ${text(registering ? "authBonus" : "authContinue")}</p>
       </div>
       <form id="authForm" class="modal-form">
+        ${registering ? `<label>${text("name")}<input id="authName" type="text" autocomplete="name" maxlength="60"></label>` : ""}
         <label>${text("email")}<input id="authEmail" type="email" autocomplete="email" required></label>
-        <label>${text("password")}<input id="authPassword" type="password" autocomplete="current-password" required></label>
-        <button class="modal-primary" type="submit">${text("submitLogin")}</button>
+        <label>${text("password")}<input id="authPassword" type="password" autocomplete="${registering ? "new-password" : "current-password"}" minlength="8" maxlength="128" required></label>
+        <button class="modal-primary" type="submit">${text(registering ? "submitRegister" : "submitLogin")}</button>
+        ${registrationOpen ? `<button class="link-button" type="button" data-auth-mode="${registering ? "login" : "register"}">${text(registering ? "switchToLogin" : "switchToRegister")}</button>` : ""}
         <button class="link-button" type="button" data-close-auth>${text("skip")}</button>
       </form>
     </section>
   `);
+
   $$("[data-auth-mode]", elements.modalLayer).forEach((button) => {
     button.addEventListener("click", () => openAuthModal(button.dataset.authMode));
   });

@@ -195,8 +195,8 @@ function renderLogs() {
         </div>
       </div>
       <div class="table-wrap">
-        ${page.length ? `<table><thead><tr><th>Image</th><th>User</th><th>Prompt</th><th>IP</th><th>Provider</th><th>Public</th><th>Status</th><th>Time</th></tr></thead><tbody>${
-          page.map(r => { let fullPrompt = esc(r.prompt); let shortPrompt = fullPrompt.length > 120 ? fullPrompt.slice(0, 120) + '...' : fullPrompt; let hasMore = fullPrompt.length > 120; let errorDetail = r.errorMessage ? esc(r.errorMessage) : ""; return `<tr><td>${r.firstGenerationId ? `<div class="thumb-row">${(r.generationIds && r.generationIds.length ? r.generationIds : [r.firstGenerationId]).map(id => `<img class="thumb adm-thumb" src="/api/images/${id}/file" data-id="${esc(id)}" loading="lazy">`).join("")}</div>` : '<div class="thumb" style="opacity:0.2"><i class="ri-image-line" style="display:grid;place-items:center;height:100%"></i></div>'}</td><td><strong>${esc(r.userName || r.userEmail || "?")}</strong><br><span class="muted">${esc(r.userEmail || "")}</span></td><td class="prompt-cell"><span class="prompt-wrap">${shortPrompt}${hasMore ? `<span class="prompt-toggle" data-full="${fullPrompt}" style="font-size:10px;color:var(--accent);cursor:pointer;margin-left:4px">\u25BC</span>` : ''}</span></td><td><span style="font-size:12px">${esc(r.ipAddress || "-")}</span></td><td><span style="font-size:12px">${esc(r.provider || "default")}</span></td><td>${r.isPublic ? '<span style="color:var(--green)">Yes</span>' : "No"}</td><td><span class="badge ${r.status === "success" ? "badge-success" : r.status === "failed" ? "badge-failed" : "badge-pending"} log-status-badge" data-fullerror="${errorDetail}" style="cursor:pointer">${esc(r.status)}</span></td><td style="white-space:nowrap;font-size:12px">${fmtFull(r.createdAt)}</td></tr>`; }).join("")
+        ${page.length ? `<table><thead><tr><th>Image</th><th>User</th><th>Prompt</th><th>IP</th><th>Provider</th><th>Public</th><th>Status</th><th>Time</th><th></th></tr></thead><tbody>${
+          page.map(r => { let fullPrompt = esc(r.prompt); let shortPrompt = fullPrompt.length > 120 ? fullPrompt.slice(0, 120) + '...' : fullPrompt; let hasMore = fullPrompt.length > 120; let errorDetail = r.errorMessage ? esc(r.errorMessage) : ""; let allIds = r.generationIds && r.generationIds.length ? r.generationIds : (r.firstGenerationId ? [r.firstGenerationId] : []); return `<tr><td>${r.firstGenerationId ? `<div class="thumb-row">${allIds.map(id => `<img class="thumb adm-thumb" src="/api/images/${id}/file" data-id="${esc(id)}" loading="lazy">`).join("")}</div>` : '<div class="thumb" style="opacity:0.2"><i class="ri-image-line" style="display:grid;place-items:center;height:100%"></i></div>'}</td><td><strong>${esc(r.userName || r.userEmail || "?")}</strong><br><span class="muted">${esc(r.userEmail || "")}</span></td><td class="prompt-cell"><span class="prompt-wrap">${shortPrompt}${hasMore ? `<span class="prompt-toggle" data-full="${fullPrompt}" style="font-size:10px;color:var(--accent);cursor:pointer;margin-left:4px">\u25BC</span>` : ''}</span></td><td><span style="font-size:12px">${esc(r.ipAddress || "-")}</span></td><td><span style="font-size:12px">${esc(r.provider || "default")}</span></td><td>${r.isPublic ? '<span style="color:var(--green)">Yes</span>' : "No"}</td><td><span class="badge ${r.status === "success" ? "badge-success" : r.status === "failed" ? "badge-failed" : "badge-pending"} log-status-badge" data-fullerror="${errorDetail}" style="cursor:pointer">${esc(r.status)}</span></td><td style="white-space:nowrap;font-size:12px">${fmtFull(r.createdAt)}</td><td style="white-space:nowrap"><button class="btn btn-sm btn-danger log-delete" data-gen-id="${esc(r.firstGenerationId || '')}" ${!r.firstGenerationId ? "disabled" : ""}><i class="ri-delete-bin-line"></i> Delete</button></td></tr>`; }).join("")
         }</tbody></table>` : `<div class="empty">No logs found</div>`}
       </div>
     </div>`;
@@ -292,6 +292,20 @@ document.addEventListener("click", function(e) {
     overlay.appendChild(box);
     document.body.appendChild(overlay);
     document.getElementById("statusModalClose").onclick = function() { overlay.remove(); };
+  }
+  let delBtn = e.target.closest(".log-delete");
+  if (delBtn) {
+    e.stopPropagation();
+    let id = delBtn.dataset.genId;
+    if (!id || !confirm("Delete this image? This cannot be undone.")) return;
+    api("/api/images/" + id + "/file", { method: "DELETE" }).then(function() {
+      state.records = state.records.filter(function(r) { return r.firstGenerationId !== id; });
+      state.logsTotal = Math.max(0, state.logsTotal - 1);
+      renderLogs();
+      toast("Image deleted");
+    }).catch(function(err) {
+      toast(err.message);
+    });
   }
 });
 

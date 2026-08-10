@@ -312,6 +312,7 @@ async function runMigrations() {
       error_message TEXT NULL,
       first_generation_id VARCHAR(32) NULL,
       generation_ids TEXT NULL,
+      refs LONGTEXT NULL,
       created_at DATETIME(3) NOT NULL,
       updated_at DATETIME(3) NOT NULL,
       INDEX idx_generation_requests_created (created_at),
@@ -337,13 +338,17 @@ async function runMigrations() {
     ]
   );
 
-  const envApiBaseUrl = process.env.AI_API_BASE_URL || process.env.OPENAI_BASE_URL || "";
-  if (envApiBaseUrl) {
-const [reqRefCol] = await db.execute("SHOW COLUMNS FROM generation_requests LIKE 'refs'");
+  const [reqRefCol] = await db.execute(
+    "SHOW COLUMNS FROM generation_requests LIKE 'refs'"
+  );
   if (!reqRefCol.length) {
-    await db.query("ALTER TABLE generation_requests ADD COLUMN refs LONGTEXT NULL AFTER generation_ids");
+    await db.query(
+      "ALTER TABLE generation_requests ADD COLUMN refs LONGTEXT NULL AFTER generation_ids"
+    );
   }
 
+  const envApiBaseUrl = process.env.AI_API_BASE_URL || process.env.OPENAI_BASE_URL || "";
+  if (envApiBaseUrl) {
   await db.execute(
       "UPDATE app_settings SET api_base_url = ? WHERE id = 1 AND api_base_url = ''",
       [envApiBaseUrl.replace(/\/+$/, "")]
@@ -813,6 +818,10 @@ async function countTodayGenerations() {
   return Number(rows[0]?.count || 0);
 }
 
+async function deleteGeneration(id) {
+  await getPool().execute("DELETE FROM generations WHERE id = ?", [id]);
+}
+
 module.exports = {
   initializeDatabase,
   getSettings,
@@ -846,7 +855,8 @@ module.exports = {
   listGenerationsForUser,
   listPublicGenerations,
   getGenerationById,
-  countTodayGenerations
+  countTodayGenerations,
+  deleteGeneration
 };
 
 

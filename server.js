@@ -1,9 +1,71 @@
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
 const fsSync = require("fs");
 const { promises: fs } = fsSync;
+
+const nativeFetch = globalThis.fetch.bind(globalThis);
+const LOCAL_ONLY_NETWORK = process.env.LOCAL_ONLY_NETWORK !== "false";
+
+function isPrivateIpv4(hostname) {
+  const parts = hostname.split(".").map(Number);
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+  return (
+    parts[0] === 10 ||
+    parts[0] === 127 ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168)
+  );
+}
+
+function assertLocalOutboundUrl(value) {
+  if (!LOCAL_ONLY_NETWORK) return;
+
+  let target;
+  try {
+    target = new URL(value);
+  } catch {
+    throw httpError("Outbound request blocked: invalid URL", 400);
+  }
+
+  const hostname = target.hostname.toLowerCase();
+  const allowedNames = new Set([
+    "localhost",
+    "openai-images-api",
+    "comfyui",
+    "imagens",
+    "127.0.0.1",
+    "::1",
+    "[::1]",
+  ]);
+
+  const allowed =
+    ["http:", "https:"].includes(target.protocol) &&
+    (
+      allowedNames.has(hostname) ||
+      isPrivateIpv4(hostname) ||
+      hostname.endsWith(".ai.hh") ||
+      hostname.endsWith(".internal") ||
+      hostname.endsWith(".local")
+    );
+
+  if (!allowed) {
+    throw httpError(
+      `Outbound request to '${hostname}' blocked by local-only network policy`,
+      403
+    );
+  }
+}
+
+globalThis.fetch = function localOnlyFetch(input, options) {
+  const value = typeof input === "string" || input instanceof URL
+    ? String(input)
+    : input?.url;
+  assertLocalOutboundUrl(value);
+  return nativeFetch(input, options);
+};
 
 const ROOT_DIR = __dirname;
 const LOG_DIR = path.join(ROOT_DIR, "log");
@@ -84,7 +146,7 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MODEL = "gemini-3.1-flash-image";
 const GEMINI_MODEL = "gemini-3.1-flash-image";
-const CHECKIN_CREDIT = Number.parseInt(process.env.CHECKIN_CREDIT || "1", 10) || 1;
+const CHECKIN_CREDIT = Math.max(0, Number.parseInt(process.env.CHECKIN_CREDIT || "0", 10) || 0);
 
 const generationWindows = new Map();
 const loginAttempts = new Map();
@@ -144,11 +206,11 @@ function generateToken() {
 }
 
 function makeCsp(nonce) {
-  return `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data: blob:; connect-src 'self' https://imagens.ru wss://imagens.ru; frame-ancestors 'none'`;
+  return `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'`;
 }
 
 function csrfCookie(token) {
-  return `csrf=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`;
+  return `csrf=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`;
 }
 
 function ensureCsrf(req, res, headers) {
@@ -489,43 +551,33 @@ function extractImageUrl(text) {
 }
 
 async function downloadImage(url, timeoutMs = 15000) {
-  // Method 1: https.get (native Node.js TLS)
+  assertLocalOutboundUrl(url);
+
+  let response;
   try {
-    return await new Promise((resolve, reject) => {
-      const u = new URL(url);
-      const mod = u.protocol === "https:" ? require("https") : require("http");
-      const req = mod.get(url, { rejectUnauthorized: false, timeout: timeoutMs }, (res) => {
-        if (res.statusCode !== 200) { reject(new Error("HTTP " + res.statusCode)); return; }
-        const chunks = [];
-        res.on("data", c => chunks.push(c));
-        res.on("end", () => resolve({ b64: Buffer.concat(chunks).toString("base64") }));
-      });
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+    response = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { "User-Agent": "Hisey-Local-Imagens/1.0" }
     });
-  } catch (e) { console.log("[DL 1/3 https.get] " + e.message); }
+  } catch (error) {
+    throw httpError(`Local image download failed: ${error.message}`, 502);
+  }
 
-  // Method 2: curl (system OpenSSL)
-  try {
-    const { execSync } = require("child_process");
-    const buf = execSync(`curl -s -m ${Math.ceil(timeoutMs / 1000)} "${url}"`, { timeout: timeoutMs + 5000, maxBuffer: 50 * 1024 * 1024 });
-    if (buf && buf.length > 100) return { b64: Buffer.from(buf).toString("base64") };
-    throw new Error("curl returned empty or too small");
-  } catch (e) { console.log("[DL 2/3 curl] " + e.message); }
+  if (!response.ok) {
+    throw httpError(`Local image download failed: HTTP ${response.status}`, 502);
+  }
 
-  // Method 3: fetch with custom https.Agent
-  try {
-    const https = require("https");
-    const agent = new https.Agent({ rejectUnauthorized: false, keepAlive: false });
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    const resp = await fetch(url, { agent, signal: ctrl.signal, headers: { "User-Agent": "Mozilla/5.0" } });
-    clearTimeout(t);
-    if (resp.ok) return { b64: Buffer.from(await resp.arrayBuffer()).toString("base64") };
-    throw new Error("HTTP " + resp.status);
-  } catch (e) { console.log("[DL 3/3 fetch+agent] " + e.message); }
+  const declaredLength = Number(response.headers.get("content-length") || 0);
+  if (declaredLength > 50 * 1024 * 1024) {
+    throw httpError("Image download exceeds the 50 MB limit", 413);
+  }
 
-  throw httpError("Image download failed", 502);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 50 * 1024 * 1024) {
+    throw httpError("Downloaded image is empty or exceeds the 50 MB limit", 413);
+  }
+
+  return { b64: bytes.toString("base64") };
 }
 
 async function callGemini(settings, prompt, references, size, n = 1) {
@@ -535,25 +587,89 @@ async function callGemini(settings, prompt, references, size, n = 1) {
     const isChat = preset === "chat" || preset === "google";
     const isCustom = preset === "custom";
 
-    let endpoint, payload;
+    let endpoint, payload, requestBody, logPayload;
+    let requestHeaders = { Authorization: "Bearer " + apiKey };
     let sizeParam = size || "1024x1024";
+    const normalizedRefs = Array.isArray(references)
+      ? references.map(ref => String(ref || "")).filter(Boolean).slice(0, 3)
+      : [];
+    const useOpenAIEdit = preset === "openai" && normalizedRefs.length > 0;
 
-    if (isChat || (isCustom && provider.customApiFormat === "chat")) {
+    if (useOpenAIEdit) {
+      let apiBase = base.replace(/\/+$/, "");
+      apiBase = apiBase.replace(/\/images\/(?:generations|edits)$/, "");
+      if (!apiBase.endsWith("/v1")) apiBase += "/v1";
+      endpoint = apiBase + "/images/edits";
+
+      const form = new FormData();
+      form.append("model", model);
+      form.append("prompt", prompt);
+      form.append("n", "1");
+      form.append("size", sizeParam);
+      form.append("quality", "auto");
+      form.append("output_format", "png");
+      form.append("response_format", "b64_json");
+
+      for (let index = 0; index < normalizedRefs.length; index++) {
+        const source = normalizedRefs[index];
+        let bytes;
+        let mime = "image/png";
+
+        if (source.startsWith("data:image/")) {
+          const comma = source.indexOf(",");
+          if (comma < 0) throw httpError("Invalid reference image data URL", 400);
+          const metadata = source.slice(5, comma);
+          const encoded = source.slice(comma + 1);
+          mime = metadata.split(";")[0] || mime;
+          bytes = metadata.includes(";base64")
+            ? Buffer.from(encoded, "base64")
+            : Buffer.from(decodeURIComponent(encoded));
+        } else if (source.startsWith("http://") || source.startsWith("https://")) {
+          const imageResponse = await fetch(source);
+          if (!imageResponse.ok) {
+            throw httpError("Unable to download reference image " + (index + 1), 400);
+          }
+          mime = (imageResponse.headers.get("content-type") || mime).split(";")[0];
+          bytes = Buffer.from(await imageResponse.arrayBuffer());
+        } else {
+          bytes = Buffer.from(source, "base64");
+        }
+
+        if (!bytes.length) throw httpError("Reference image " + (index + 1) + " is empty", 400);
+        const extension = mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : "png";
+        form.append(
+          "image[]",
+          new Blob([bytes], { type: mime }),
+          "reference-" + (index + 1) + "." + extension
+        );
+      }
+
+      payload = form;
+      requestBody = form;
+      logPayload = {
+        model,
+        prompt,
+        n: 1,
+        size: sizeParam,
+        reference_image_count: normalizedRefs.length,
+        endpoint_type: "openai_image_edit"
+      };
+    } else if (isChat || (isCustom && provider.customApiFormat === "chat")) {
       if (base.endsWith("/chat/completions") || base.endsWith("/chat/completions/")) {
         endpoint = base;
       } else {
         endpoint = base.endsWith("/v1") ? base + "/chat/completions" : base + "/v1/chat/completions";
       }
       const content = [{ type: "text", text: prompt + (size ? " (" + size + ")" : "") }];
-      if (references && Array.isArray(references)) {
-        for (const ref of references) {
-          const s = String(ref || "");
-          if (s.startsWith("data:image/") || s.startsWith("http")) {
-            content.push({ type: "image_url", image_url: { url: s } });
-          }
+      for (const source of normalizedRefs) {
+        if (source.startsWith("data:image/") || source.startsWith("http")) {
+          content.push({ type: "image_url", image_url: { url: source } });
         }
       }
       payload = { model, messages: [{ role: "user", content }], max_tokens: 4096 };
+      requestHeaders["Content-Type"] = "application/json";
+      requestBody = JSON.stringify(payload);
+      logPayload = payload;
     } else {
       if (base.endsWith("/images/generations") || base.endsWith("/images/generations/")) {
         endpoint = base;
@@ -565,20 +681,23 @@ async function callGemini(settings, prompt, references, size, n = 1) {
         sizeParam = sizeMap[size] || "auto";
       }
       payload = { model, prompt, n: 1, size: sizeParam };
-      if (references && Array.isArray(references) && references.length > 0) {
+      if (normalizedRefs.length > 0) {
         const refField = isEvolink ? "image_urls" : (isCustom ? (provider.customRefField || "image_prompts") : "image_prompts");
-        if (refField !== "none") payload[refField] = references;
+        if (refField !== "none") payload[refField] = normalizedRefs;
       }
+      requestHeaders["Content-Type"] = "application/json";
+      requestBody = JSON.stringify(payload);
+      logPayload = payload;
     }
 
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      headers: requestHeaders,
+      body: requestBody
     });
     
     const text = await response.text();
-    await logApiInteraction(endpoint, payload, text);
+    await logApiInteraction(endpoint, logPayload, text);
 
     if (!response.ok) {
       let msg = "API request failed";
@@ -887,7 +1006,8 @@ async function routeApi(req, res, url) {
     const current = await getCurrentUser(req);
     const firstRun = (await store.countUsers()) === 0;
     if (!current?.user) {
-      return sendJson(res, 200, { ok: true, firstRun, settings: { hasApiKey: false, allowRegistration: false, requireApproval: true, defaultCredits: 0, generationCreditCost: 1, checkinCredit: 0, maxImagesPerRequest: 1, uiConfig: "" } });
+      const settings = await store.getSettings();
+      return sendJson(res, 200, { ok: true, firstRun, settings: publicSettings(settings) });
     }
     const settings = await store.getSettings();
     return sendJson(res, 200, {
@@ -900,7 +1020,8 @@ async function routeApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/auth/me") {
     const current = await getCurrentUser(req);
     if (!current?.user) {
-      return sendJson(res, 200, { user: null, firstRun: (await store.countUsers()) === 0, settings: { hasApiKey: false, allowRegistration: false, requireApproval: true, defaultCredits: 0, generationCreditCost: 1, checkinCredit: 0, maxImagesPerRequest: 1, uiConfig: "" } });
+      const settings = await store.getSettings();
+      return sendJson(res, 200, { user: null, firstRun: (await store.countUsers()) === 0, settings: publicSettings(settings) });
     }
     const settings = await store.getSettings();
     return sendJson(res, 200, {
@@ -915,7 +1036,54 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/auth/register") {
-    throw httpError("Registration is closed. Contact administrator.", 403);
+    const ip = getClientIp(req);
+    checkLoginRate(ip);
+
+    const settings = await store.getSettings();
+    if (!settings.allowRegistration) {
+      throw httpError("Registration is closed. Contact administrator.", 403);
+    }
+
+    const body = await readJsonBody(req);
+    const email = normalizeEmail(body.email);
+    const password = String(body.password || "");
+    const name = stripHtml(body.name || "").trim().slice(0, 60);
+
+    if (!email || !email.includes("@") || email.length > 254) {
+      throw httpError("A valid email address is required", 400);
+    }
+    if (password.length < 8 || password.length > 128) {
+      throw httpError("Password must be between 8 and 128 characters", 400);
+    }
+    if (await store.getUserByEmail(email)) {
+      throw httpError("Email already exists", 409);
+    }
+
+    const status = settings.requireApproval ? "pending" : "active";
+    const userId = randomId("usr_");
+
+    await store.createUser({
+      id: userId,
+      email,
+      passwordHash: hashPassword(password),
+      name,
+      role: "user",
+      status,
+      credits: Math.max(0, Number(settings.defaultCredits ?? 10) || 0),
+      createdAt: nowIso()
+    });
+
+    clearLoginRate(ip);
+
+    if (status !== "active") {
+      return sendJson(res, 201, { pendingApproval: true });
+    }
+
+    const user = await store.getUserById(userId);
+    const token = await createSession(userId);
+    return sendJson(res, 201, { user: serializeUser(user) }, {
+      "Set-Cookie": `session=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/auth/login") {
@@ -1399,6 +1567,28 @@ async function routeApi(req, res, url) {
     });
     res.end(bytes);
     return;
+  }
+  if (fileMatch && req.method === "DELETE") {
+    const current = await getCurrentUser(req);
+    ensureAuthenticated(current);
+    const generation = await store.getGenerationById(fileMatch[1]);
+    if (!generation) {
+      throw httpError("Image not found", 404);
+    }
+    if (!canTouchGeneration(current.user, generation)) {
+      throw httpError("Image not found", 404);
+    }
+    let absolutePath = path.join(GENERATED_DIR, generation.filename);
+    if (!fsSync.existsSync(absolutePath)) {
+      absolutePath = path.join(GENERATED_DIR, path.basename(generation.filename));
+    }
+    try {
+      await fs.unlink(absolutePath);
+    } catch (e) {
+      console.error("[DELETE IMAGE] Failed to delete file:", e.message);
+    }
+    await store.deleteGeneration(fileMatch[1]);
+    return sendJson(res, 200, { success: true });
   }
 
   sendError(res, 404, "API route not found");

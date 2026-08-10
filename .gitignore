@@ -1,0 +1,19 @@
+# Runtime data
+data/
+log/
+
+# MySQL database files
+mysql/
+
+# Environment
+.env
+
+# Backup files
+*.before-*
+
+# Kilo planning files
+.kilo/plans/
+
+# OS / editor
+.DS_Store
+Thumbs.db
